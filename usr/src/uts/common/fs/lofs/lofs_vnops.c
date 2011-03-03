@@ -22,8 +22,9 @@
  * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
+/*
+ * Copyright 2011 Joyent, Inc.
+ */
 
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -35,6 +36,7 @@
 #include <sys/cred.h>
 #include <sys/pathname.h>
 #include <sys/debug.h>
+#include <sys/cmn_err.h>
 #include <sys/fs/lofs_node.h>
 #include <sys/fs/lofs_info.h>
 #include <fs/fs_subr.h>
@@ -335,14 +337,25 @@ lo_lookup(
 
 	*vpp = NULL;	/* default(error) case */
 
-	/*
-	 * Do the normal lookup
-	 */
-	if (error = VOP_LOOKUP(realdvp, nm, &vp, pnp, flags, rdir, cr,
-	    ct, direntflags, realpnp)) {
-		vp = NULL;
-		goto out;
-	}
+    /*
+     * Do the normal lookup
+     */
+    if (error = VOP_LOOKUP(realdvp, nm, &vp, pnp, flags, rdir, cr,
+        ct, direntflags, realpnp)) {
+
+        if(vfs_optionisset(dvp->v_vfsp, MNTOPT_LOFS_UNION, NULL)) {
+            error = VOP_LOOKUP(dvp->v_vfsp->vfs_vnodecovered, nm, &vp, pnp,
+                    flags, rdir, cr, ct, direntflags, realpnp);
+            if(error) {
+                    vp = NULL;
+                    goto out;
+            }
+        }
+        else {
+            vp = NULL;
+            goto out;
+        }
+    }
 
 	/*
 	 * We do this check here to avoid returning a stale file handle to the
@@ -953,12 +966,57 @@ lo_readdir(
 	caller_context_t *ct,
 	int flags)
 {
+    int error;
+    int eofp_l = 0;
+    vnode_t *rvp;
+    vnode_t *vpp = NULL;
+    pathname_t *pnp;
+    pathname_t *realpnp = NULL;
+    
+    uio_t u_uio, l_uio;
+    iovec_t uvec, lvec;
+    
+    caddr_t ubuf, lbuf;
+    
+    size_t len;
+
 #ifdef LODEBUG
-	lo_dprint(4, "lo_readdir vp %p realvp %p\n", vp, realvp(vp));
+    lo_dprint(4, "lo_readdir vp %p realvp %p\n", vp, realvp(vp));
 #endif
-	vp = realvp(vp);
-	return (VOP_READDIR(vp, uiop, cr, eofp, ct, flags));
+    rvp = realvp(vp);
+
+    if(!vfs_optionisset(vp->v_vfsp, MNTOPT_LOFS_UNION, NULL)) {
+           return VOP_READDIR(rvp, uiop, cr, eofp, ct, flags);
+    }
+
+    len = uiop->uio_iov->iov_len;
+
+    uvec.iov_base = ubuf = kmem_zalloc(len, KM_SLEEP);
+    lvec.iov_base = lbuf = kmem_zalloc(len, KM_SLEEP);
+    uvec.iov_len = lvec.iov_len = len;
+    
+    u_uio.uio_segflg = l_uio.uio_segflg = UIO_SYSSPACE;
+    u_uio.uio_iovcnt = l_uio.uio_iovcnt = 1;
+    u_uio.uio_fmode = l_uio.uio_fmode = uiop->uio_fmode;
+    u_uio.uio_extflg = l_uio.uio_extflg = UIO_COPY_CACHED;
+    u_uio.uio_resid = l_uio.uio_resid = len;
+    u_uio.uio_loffset = l_uio.uio_loffset = uiop->uio_loffset;
+    
+    u_uio.uio_iov = &uvec;
+    l_uio.uio_iov = &lvec;
+    
+    error = VOP_READDIR(rvp, &u_uio, cr, eofp, ct, flags);
+    if (!error) {
+        error = uiomove(ubuf, uvec.iov_base - ubuf, UIO_READ, uiop);
+        uiop->uio_loffset = u_uio.uio_loffset;
+    }
+    
+    kmem_free(ubuf, len);
+    kmem_free(lbuf, len);
+
+    return error;
 }
+
 
 static int
 lo_rwlock(vnode_t *vp, int write_lock, caller_context_t *ct)
