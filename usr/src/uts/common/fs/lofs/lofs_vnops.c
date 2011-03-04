@@ -967,17 +967,14 @@ lo_readdir(
 	int flags)
 {
     int error;
-    int eofp_l = 0;
     vnode_t *rvp;
-    vnode_t *vpp = NULL;
-    pathname_t *pnp;
-    pathname_t *realpnp = NULL;
-    
+    vnode_t *vpp;
+    vnode_t *compvpp;
+
     uio_t u_uio, l_uio;
     iovec_t uvec, lvec;
-    
     caddr_t ubuf, lbuf;
-    
+
     size_t len;
 
 #ifdef LODEBUG
@@ -1011,6 +1008,20 @@ lo_readdir(
         uiop->uio_loffset = u_uio.uio_loffset;
     }
     
+    // Lower mount
+    
+    error = lookupnameat(vp->v_path, UIO_SYSSPACE, 0,
+        &vpp, &compvpp, vp->v_vfsp->vfs_vnodecovered);
+
+    /* just for testing, this works on the root of the mount. Should be using the 
+     * result of a successful lookup above
+     */
+    error = VOP_READDIR(vp->v_vfsp->vfs_vnodecovered, &l_uio, cr, eofp, ct, flags);
+
+    if (!error) {
+        error = uiomove(lbuf, lvec.iov_base - lbuf, UIO_READ, uiop);
+        uiop->uio_loffset = l_uio.uio_loffset;
+    }    
     kmem_free(ubuf, len);
     kmem_free(lbuf, len);
 
