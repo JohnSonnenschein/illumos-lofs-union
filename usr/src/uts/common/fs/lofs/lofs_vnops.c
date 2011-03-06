@@ -1076,6 +1076,9 @@ lo_readdir(
     uio_t u_uio;
     iovec_t uvec;
     caddr_t ubuf;
+    uio_t l_uio;
+    iovec_t lvec;
+    caddr_t lbuf;
     size_t len;
 
 #ifdef LODEBUG
@@ -1100,7 +1103,18 @@ lo_readdir(
     u_uio.uio_loffset = uiop->uio_loffset;
     
     u_uio.uio_iov = &uvec;
-    
+
+    lvec.iov_base = lbuf = kmem_zalloc(len, KM_SLEEP);
+    lvec.iov_len = len;
+
+    l_uio.uio_segflg = UIO_SYSSPACE;
+    l_uio.uio_iovcnt = 1;
+    l_uio.uio_fmode = uiop->uio_fmode;
+    l_uio.uio_extflg = UIO_COPY_CACHED;
+    l_uio.uio_resid = len;
+    l_uio.uio_loffset = uiop->uio_loffset;
+
+    l_uio.uio_iov = &lvec;
     error = VOP_READDIR(rvp, &u_uio, cr, eofp, ct, flags);
 
     if (error != 0)
@@ -1116,9 +1130,20 @@ lo_readdir(
 	    goto out;
 
     /* XXX: READDIR of lower and merge */
+    error = VOP_READDIR(lvp, &l_uio, cr, eofp, ct, flags);
+
+    if (error != 0)
+        goto out;
+
+    error = uiomove(lbuf, lvec.iov_base - lbuf, UIO_READ, uiop);
+    if (error != 0)
+        goto out;
+
+    uiop->uio_loffset = l_uio.uio_loffset;
 
 out:
     kmem_free(ubuf, len);
+    kmem_free(lbuf, len);
 
     return error;
 }
