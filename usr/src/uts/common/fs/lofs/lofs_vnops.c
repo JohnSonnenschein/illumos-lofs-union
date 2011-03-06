@@ -968,13 +968,9 @@ lo_readdir(
 {
     int error;
     vnode_t *rvp;
-    vnode_t *vpp;
-    vnode_t *compvpp;
-
-    uio_t u_uio, l_uio;
-    iovec_t uvec, lvec;
-    caddr_t ubuf, lbuf;
-
+    uio_t u_uio;
+    iovec_t uvec;
+    caddr_t ubuf;
     size_t len;
 
 #ifdef LODEBUG
@@ -982,48 +978,39 @@ lo_readdir(
 #endif
     rvp = realvp(vp);
 
-    if(!vfs_optionisset(vp->v_vfsp, MNTOPT_LOFS_UNION, NULL)) {
+    if (!vfs_optionisset(vp->v_vfsp, MNTOPT_LOFS_UNION, NULL)) {
            return VOP_READDIR(rvp, uiop, cr, eofp, ct, flags);
     }
 
     len = uiop->uio_iov->iov_len;
 
     uvec.iov_base = ubuf = kmem_zalloc(len, KM_SLEEP);
-    lvec.iov_base = lbuf = kmem_zalloc(len, KM_SLEEP);
-    uvec.iov_len = lvec.iov_len = len;
+    uvec.iov_len = len;
     
-    u_uio.uio_segflg = l_uio.uio_segflg = UIO_SYSSPACE;
-    u_uio.uio_iovcnt = l_uio.uio_iovcnt = 1;
-    u_uio.uio_fmode = l_uio.uio_fmode = uiop->uio_fmode;
-    u_uio.uio_extflg = l_uio.uio_extflg = UIO_COPY_CACHED;
-    u_uio.uio_resid = l_uio.uio_resid = len;
-    u_uio.uio_loffset = l_uio.uio_loffset = uiop->uio_loffset;
+    u_uio.uio_segflg = UIO_SYSSPACE;
+    u_uio.uio_iovcnt = 1;
+    u_uio.uio_fmode = uiop->uio_fmode;
+    u_uio.uio_extflg = UIO_COPY_CACHED;
+    u_uio.uio_resid = len;
+    u_uio.uio_loffset = uiop->uio_loffset;
     
     u_uio.uio_iov = &uvec;
-    l_uio.uio_iov = &lvec;
     
     error = VOP_READDIR(rvp, &u_uio, cr, eofp, ct, flags);
-    if (!error) {
-        error = uiomove(ubuf, uvec.iov_base - ubuf, UIO_READ, uiop);
-        uiop->uio_loffset = u_uio.uio_loffset;
-    }
-    
-    // Lower mount
-    
-    error = lookupnameat(vp->v_path, UIO_SYSSPACE, 0,
-        &vpp, &compvpp, vp->v_vfsp->vfs_vnodecovered);
 
-    /* just for testing, this works on the root of the mount. Should be using the 
-     * result of a successful lookup above
-     */
-    error = VOP_READDIR(vp->v_vfsp->vfs_vnodecovered, &l_uio, cr, eofp, ct, flags);
+    if (error != 0)
+        goto out;
 
-    if (!error) {
-        error = uiomove(lbuf, lvec.iov_base - lbuf, UIO_READ, uiop);
-        uiop->uio_loffset = l_uio.uio_loffset;
-    }    
+    error = uiomove(ubuf, uvec.iov_base - ubuf, UIO_READ, uiop);
+    if (error != 0)
+        goto out;
+
+    uiop->uio_loffset = u_uio.uio_loffset;
+
+    /* XXX: READDIR of lower and merge */
+
+out:
     kmem_free(ubuf, len);
-    kmem_free(lbuf, len);
 
     return error;
 }
