@@ -957,6 +957,110 @@ lo_readlink(
 	return (VOP_READLINK(vp, uiop, cr, ct));
 }
 
+static pathname_t *
+relpn(pathname_t *pn, vnode_t *relvp)
+{
+	pathname_t vpn;
+	pathname_t *ret = NULL;
+	char pncomp[MAXNAMELEN];
+	char vncomp[MAXNAMELEN];
+
+	if (pn_get(relvp->v_path, UIO_SYSSPACE, &vpn) != 0)
+		return NULL;
+
+	/*
+	 * If the paths match, the relative path from one to the other
+	 * is explicitly ".".
+	 *
+	 * XXX: This feels wrong
+	 */
+	if (strcmp(pn->pn_path, relvp->v_path) == 0) {
+		ret = kmem_zalloc(sizeof (pathname_t), KM_SLEEP);
+		pn_alloc(ret);
+		pn_set(ret, ".");
+		return ret;
+	}
+
+	/* If the vnode path is longest, pn can't be a child */
+	if (strlen(pn->pn_path) < strlen(relvp->v_path))
+		return NULL;
+	
+	while (pn_pathleft(&vpn) && pn_pathleft(pn)) {
+		pn_skipslash(&vpn);
+		pn_skipslash(pn);
+
+		/* These only return non-0 on actual error */
+		if ((pn_getcomponent(pn, pncomp) != 0) ||
+		    (pn_getcomponent(&vpn, vncomp) != 0))
+			return NULL;
+
+		if (strcmp(pncomp, vncomp) != 0)
+			return NULL;
+	}
+
+	if (pn_pathleft(pn)) {
+		pn_skipslash(pn);
+		ret = kmem_zalloc(sizeof (pathname_t), KM_SLEEP);
+		pn_get(pn->pn_path, UIO_SYSSPACE, ret);
+	}
+
+	return ret;
+}
+
+static int
+lowervn(vnode_t *vp, cred_t *cr, vnode_t **lvp)
+{
+	pathname_t *rpn;
+	pathname_t vpn;
+	int err = 0;
+
+	pn_get(vp->v_path, UIO_SYSSPACE, &vpn);
+
+	if ((rpn = relpn(&vpn, vp->v_vfsp->vfs_vnodecovered)) == NULL)
+		return -1;
+
+	/*
+	 * If we're asked for the mountpoint, we can return the underlying
+	 * vnode directly.
+	 */
+	if (strcmp(vp->v_path, vp->v_vfsp->vfs_vnodecovered->v_path) == 0) {
+		*lvp = vp->v_vfsp->vfs_vnodecovered;
+	} else {
+		char comp[MAXNAMELEN];
+		pathname_t pn;
+		vnode_t *pvp;
+
+		/*
+		 * lookup* traverse mountpoints unconditionally, lookup the
+		 * first level component by hand to avoid the traversal into
+		 * the upper layer, and then lookup as normal.
+		 */
+		 pn_getcomponent(rpn, comp);
+		 err = VOP_LOOKUP(vp->v_vfsp->vfs_vnodecovered,
+		     comp, &pvp, NULL, 0, NULL, cr, NULL, NULL, NULL);
+
+		 if (err != 0)
+			 goto out;
+
+		 /*
+		  * If the request was only be one level below the mountpoint,
+		  * we're done
+		  */
+		 if (!pn_pathleft(&pn)) {
+			 *lvp = pvp;
+		 } else {
+			/* XXX: Really lookup links? */
+			 err = lookuppnat(rpn, NULL, 1,
+			     NULL, lvp, pvp);
+		 }
+	}
+out:
+	pn_free(rpn);
+	kmem_free(rpn, sizeof (pathname_t));
+	pn_free(&vpn);
+	return err;
+}
+
 static int
 lo_readdir(
 	vnode_t *vp,
@@ -968,6 +1072,7 @@ lo_readdir(
 {
     int error;
     vnode_t *rvp;
+    vnode_t *lvp;
     uio_t u_uio;
     iovec_t uvec;
     caddr_t ubuf;
@@ -1006,6 +1111,9 @@ lo_readdir(
         goto out;
 
     uiop->uio_loffset = u_uio.uio_loffset;
+
+    if ((error = lowervn(vp, cr, &lvp)) != 0)
+	    goto out;
 
     /* XXX: READDIR of lower and merge */
 
