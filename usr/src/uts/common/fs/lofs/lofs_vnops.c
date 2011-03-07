@@ -1025,6 +1025,7 @@ lowervn(vnode_t *vp, cred_t *cr, vnode_t **lvp)
 	 */
 	if (strcmp(vp->v_path, vp->v_vfsp->vfs_vnodecovered->v_path) == 0) {
 		*lvp = vp->v_vfsp->vfs_vnodecovered;
+		VN_HOLD(vp->v_vfsp->vfs_vnodecovered);
 	} else {
 		char comp[MAXNAMELEN];
 		vnode_t *pvp;
@@ -1046,12 +1047,15 @@ lowervn(vnode_t *vp, cred_t *cr, vnode_t **lvp)
 		  * we're done
 		  */
 		 if (!pn_pathleft(rpn)) {
+			 /* pvp was already held by the VOP_LOOKUP */
 			 *lvp = pvp;
 		 } else {
 			/* XXX: Really lookup links? */
 			 pn_skipslash(rpn);
 			 err = lookuppnat(rpn, NULL, 1,
 			     NULL, lvp, pvp);
+			 /* lvp is already held by the lookuppnat */
+			 VN_RELE(pvp);
 		 }
 	}
 out:
@@ -1133,14 +1137,16 @@ lo_readdir(
     error = VOP_READDIR(lvp, &l_uio, cr, eofp, ct, flags);
 
     if (error != 0)
-        goto out;
+        goto release;
 
     error = uiomove(lbuf, lvec.iov_base - lbuf, UIO_READ, uiop);
     if (error != 0)
-        goto out;
+        goto release;
 
     uiop->uio_loffset = l_uio.uio_loffset;
 
+release:
+    VN_RELE(lvp);
 out:
     kmem_free(ubuf, len);
     kmem_free(lbuf, len);
