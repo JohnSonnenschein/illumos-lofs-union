@@ -43,6 +43,9 @@
 #include <vm/as.h>
 #include <vm/seg.h>
 
+static int lowervn(vnode_t *, cred_t *, vnode_t **);
+static pathname_t *relpn(pathname_t *, vnode_t *);
+
 /*
  * These are the vnode ops routines which implement the vnode interface to
  * the looped-back file system.  These routines just take their parameters,
@@ -337,25 +340,44 @@ lo_lookup(
 
 	*vpp = NULL;	/* default(error) case */
 
-    /*
-     * Do the normal lookup
-     */
-    if (error = VOP_LOOKUP(realdvp, nm, &vp, pnp, flags, rdir, cr,
-        ct, direntflags, realpnp)) {
+	/*
+	 * Do the normal lookup
+	 */
+	if (error = VOP_LOOKUP(realdvp, nm, &vp, pnp, flags, rdir, cr,
+		ct, direntflags, realpnp)) {
+		if (vfs_optionisset(dvp->v_vfsp, MNTOPT_LOFS_UNION, NULL)) {
+			vnode_t *lvp;
+			
+			/* XXX: Are we crapping on the better error here? */
+			if ((error = lowervn(dvp, cr, &lvp) != 0)) {
+				vp = NULL;
+				goto out;
+			}
+        			
+			error = VOP_LOOKUP(lvp, nm, &vp, pnp,
+			    flags, rdir, cr, ct, direntflags, realpnp);
 
-        if(vfs_optionisset(dvp->v_vfsp, MNTOPT_LOFS_UNION, NULL)) {
-            error = VOP_LOOKUP(dvp->v_vfsp->vfs_vnodecovered, nm, &vp, pnp,
-                    flags, rdir, cr, ct, direntflags, realpnp);
-            if(error) {
-                    vp = NULL;
-                    goto out;
-            }
-        }
-        else {
-            vp = NULL;
-            goto out;
-        }
-    }
+			VN_RELE(lvp);
+			if (error) {
+				vp = NULL;
+				goto out;
+			}
+
+			/*
+			 * XXX: I think we should: realdvp = lvp here 
+			 *
+			 * I don't follow all the implications in the loop
+			 * detection, below, and I'm not sure what we'd need
+			 * to do with lvp's reference count, but I think
+			 * realdvp being lvp is necessary for the rest of this
+			 * to continue to do the right things with loops.
+			 */
+
+		} else {
+			vp = NULL;
+			goto out;
+		}
+	}
 
 	/*
 	 * We do this check here to avoid returning a stale file handle to the
