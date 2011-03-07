@@ -1027,7 +1027,6 @@ lowervn(vnode_t *vp, cred_t *cr, vnode_t **lvp)
 		*lvp = vp->v_vfsp->vfs_vnodecovered;
 	} else {
 		char comp[MAXNAMELEN];
-		pathname_t pn;
 		vnode_t *pvp;
 
 		/*
@@ -1046,10 +1045,11 @@ lowervn(vnode_t *vp, cred_t *cr, vnode_t **lvp)
 		  * If the request was only be one level below the mountpoint,
 		  * we're done
 		  */
-		 if (!pn_pathleft(&pn)) {
+		 if (!pn_pathleft(rpn)) {
 			 *lvp = pvp;
 		 } else {
 			/* XXX: Really lookup links? */
+			 pn_skipslash(rpn);
 			 err = lookuppnat(rpn, NULL, 1,
 			     NULL, lvp, pvp);
 		 }
