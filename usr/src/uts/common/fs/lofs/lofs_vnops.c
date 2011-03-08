@@ -1160,10 +1160,23 @@ lo_readdir(
 
     if (error != 0)
         goto release;
-
-    error = uiomove(lbuf, lvec.iov_base - lbuf, UIO_READ, uiop);
-    if (error != 0)
-        goto release;
+    
+    while(*lbuf != NULL) {
+        int found = 0;
+        caddr_t upper_dirs = ubuf;
+        while(*upper_dirs != NULL) {
+            if (!strcmp(((dirent_t*)lbuf)->d_name, ((dirent_t*)upper_dirs)->d_name)) {
+                found = 1;
+                break;
+            }
+            upper_dirs += sizeof(dirent_t);
+        }
+        if (!found)
+            error = uiomove(lbuf, sizeof(dirent_t), UIO_READ, uiop);
+        lbuf += sizeof(dirent_t);
+        if (error != 0)
+            goto release;
+    }
 
     uiop->uio_loffset = l_uio.uio_loffset;
 
