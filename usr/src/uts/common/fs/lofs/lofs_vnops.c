@@ -45,7 +45,7 @@
 
 static int lowervn(vnode_t *, cred_t *, vnode_t **);
 static pathname_t *relpn(pathname_t *, vnode_t *);
-
+void pn_striplast(pathname_t *);
 /*
  * These are the vnode ops routines which implement the vnode interface to
  * the looped-back file system.  These routines just take their parameters,
@@ -906,14 +906,58 @@ lo_mkdir(
 	vsecattr_t *vsecp)
 {
 	int error;
-
+	
+	pathname_t *pnp, *pnp_full;
+	char *top, *bottom;
+	vnode_t *firstshared;
+	vnode_t *realrootvpp;
+	
 #ifdef LODEBUG
 	lo_dprint(4, "lo_mkdir vp %p realvp %p\n", dvp, realvp(dvp));
 #endif
-	error = VOP_MKDIR(realvp(dvp), nm, va, vpp, cr, ct, flags, vsecp);
-	if (!error)
-		*vpp = makelonode(*vpp, vtoli(dvp->v_vfsp), 0);
-	return (error);
+    if (!vfs_optionisset(dvp->v_vfsp, MNTOPT_LOFS_UNION, NULL)) {
+	    error = VOP_MKDIR(realvp(dvp), nm, va, vpp, cr, ct, flags, vsecp);
+	    if (!error)
+		    *vpp = makelonode(*vpp, vtoli(dvp->v_vfsp), 0);
+	    return (error);
+    }
+    /* If the directory we want to create doesn't have a parent on the
+     * upper half, we need to create it before creating nm.
+		 * 
+		 * Find the first path element that has a corresponding
+		 * directory vnode on the top layer, strip everything in the path
+		 * before it, then loop through & create directories up to the point
+		 * we want
+     */
+    pn_alloc(pnp);
+    pn_alloc(pnp_full);
+		if (pn_get(dvp->v_path, UIO_SYSSPACE, pnp) != 0 || pnp->pn_buf == NULL)
+			return (ENOENT);
+
+		pnp_full = pnp;
+		firstshared = NULL;
+		realrootvpp = vtol(vtoli((*vpp)->v_vfsp)->li_rootvp)->lo_vp;
+
+		while (firstshared == NULL && pnp->pn_buf != '\0') {
+			pn_striplast(pnp);
+			lookuppnat(pnp, NULL, 1,
+			    NULL, &firstshared, realrootvpp);
+		}
+		
+		/* grab the first shared entry */
+		pn_getcomponent(pnp, top);
+		if ( *top == '\0' )
+			return (ENOENT);
+
+		for( pn_getcomponent(pnp_full, bottom);
+			strcmp(top, bottom) != 0 || *bottom == '\0';
+			pn_getcomponent(pnp_full, bottom));
+
+		while(*bottom != '\0') {
+			VOP_MKDIR(firstshared, bottom, va, &firstshared, cr, ct, flags, vsecp);
+			pn_getcomponent(pnp_full, bottom);
+		}
+    return (0);
 }
 
 static int
@@ -977,6 +1021,22 @@ lo_readlink(
 {
 	vp = realvp(vp);
 	return (VOP_READLINK(vp, uiop, cr, ct));
+}
+
+void
+pn_striplast(pathname_t *pnp)
+{
+	char *buf = pnp->pn_buf;
+	char *path = pnp->pn_path + pnp->pn_pathlen - 1;
+
+	if (*buf == '\0')
+		return;
+
+	while (path > buf && *path != '/')
+		--path;
+	*path = '\0';
+
+	pnp->pn_pathlen = path - pnp->pn_path;
 }
 
 static pathname_t *
